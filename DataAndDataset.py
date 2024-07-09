@@ -58,7 +58,7 @@ def process(img  , landmarks_5pts):
 
 ##### Pretrain Dataset 和其輔助函式 #####
 class PretrainDataset( Dataset):
-    def __init__( self , txt_name, data_root_dir):
+    def __init__( self , txt_name, data_root_dir ):
         """
         Args:
             txt_name (string): 包含圖像名稱和標籤的 txt 文件路徑
@@ -74,17 +74,15 @@ class PretrainDataset( Dataset):
         img_path = self.image_names[idx]
 
         # 從路徑名稱中提取圖片名稱
-        img_name = img_path.split('\\')[-1]
+        img_name = img_path.split('/')[-1]
 
         # 讀取圖片
-        image = Image.open( img_path ).convert('RGB')  # 確保圖片是RGB格式
+        with Image.open( img_path ).convert('RGB') as img:
+            transform = transforms.ToTensor()
+            image = transform( img )
 
         # 獲取對應圖片名的的標籤
         label_groups = self.labels[img_name]
-
-        # 將 PIL Image 轉換為 Tensor
-        transform = transforms.ToTensor()
-        image = transform( image )
 
         # 將每個座標轉換成獨立的張量，並展平為一維張量
         label_tensors = torch.tensor([

@@ -2,12 +2,12 @@
 
 pretrain = {}
 pretrain['txt_name'] = 'list_landmarks_celeba.txt'                            # pretrain 資料集的 label 檔案
-pretrain['data_root_dir'] = 'C:\\Users\\User\\Downloads\\CelebA'              # pretrain 資料集的根目錄路徑
-pretrain['log_root_dir'] = 'C:\\Users\\User\\Desktop\\Test\\SummaryWriterLog' # SummaryWriter 的 Log 的放置處的根目錄路徑
+pretrain['data_root_dir'] = '/home/nini/Downloads/CelebA'                     # pretrain 資料集的根目錄路徑
+pretrain['log_root_dir'] = '/home/nini/Desktop/SummaryWriterLog' # SummaryWriter 的 Log 的放置處的根目錄路徑
 pretrain['model_name'] = 'MobileNetV2'                                        # pretrain 所使用的模型名稱
 
-pretrain['train_data_ratio'] = 0.7      # 訓練資料集的比例
-pretrain['validation_data_ratio'] = 0.2 # 驗證資料集的比例
+pretrain['train_data_ratio'] = 0.95      # 訓練資料集的比例
+pretrain['validation_data_ratio'] = 0.0005 # 驗證資料集的比例
 # 不設定測試集的比例是因為要「用總數直接減去上兩者」, 不然可能會發生三部分資料集加總不等於原始資料集數量的問題
 pretrain['batch_size'] = 1              # batch size 設為 1 才能處理輸入空間尺寸不同的圖片
 
@@ -17,13 +17,13 @@ pretrain['use_learning_rate_scheduler'] = True               # 是否使用學�
 pretrain['learning_rate_scheduler_milestone'] = [10, 20, 30] # 指定個 epoch 降低學習率
 pretrain['learning_rate_scheduler_gamma'] =  0.1             # 每次學習率降低會變為原來的 n 倍
 
-pretrain['num_epochs'] = 35          # 指定訓練的 epochs 數
-pretrain['log_step_of_batchs'] = 300 # 記錄一次 log 所需的 batch 數
+pretrain['num_epochs'] = 5          # 指定訓練的 epochs 數
+pretrain['log_step_of_batchs'] = 2000 # 記錄一次 log 所需的 batch 數
 
 
 ##### Optimizer 參數 #####
 optimizer_param = {}
-optimizer_param['learning_rate'] = 1e-1  # 學習率
+optimizer_param['learning_rate'] = 1e-3  # 學習率
 optimizer_param['momentum'] = 0.9        # 動量係數
 optimizer_param['nesterov'] = True       # 是否使用 Nesterov 加速
 optimizer_param['weight_decay'] = 1e-4   # L2 正則化係數

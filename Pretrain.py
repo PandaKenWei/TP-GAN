@@ -37,7 +37,7 @@ def _calculate_loss( predicts, ground_truth ):
 
 def _calculate_accuracy(predicts, ground_truth):
     """
-    計算預測與真實座標之間的平均絕對誤差作為準確度
+    計算預測與真實座標之間的 euclid distance 作為準確度
 
     Args:
         predicts (Tensor): 形狀為 [batch_size, 8] 的預測座標張量
@@ -47,15 +47,52 @@ def _calculate_accuracy(predicts, ground_truth):
         float: 平均絕對誤差
     """
 
+    # 1024*1024 -> [10, 20, 31, 41, 51]
+    # 96*96     -> [ 1,  2,  3,  4,  5]
+    thresholds = [5, 10, 18, 30, 45]
+    weights = [1.0, 0.9, 0.65, 0.35, 0.1]
+    
     # 確保 predicts 和 ground_truth 具有相同的形狀
     if predicts.shape != ground_truth.shape:
         raise ValueError("Predicts and ground truth tensors must have the same shape")
 
     # 計算平均絕對誤差
-    absolute_errors = torch.abs(predicts - ground_truth)
-    mean_absolute_error = torch.mean(absolute_errors).item()
-    
-    return mean_absolute_error
+    # absolute_errors = torch.abs(predicts - ground_truth)
+    # mean_absolute_error = torch.mean(absolute_errors).item()
+
+    # chagne tensor to set of point of (x,y)
+    predicts = predicts.view( -1, 4, 2 )
+    ground_truth = ground_truth.view( -1, 4, 2 )
+
+    # calculate euclid distance of each point set
+    distances = torch.sqrt( torch.sum( (predicts - ground_truth)**2, dim=2 ) )
+
+    # initialize tensor of Accuracy
+    accuracy = torch.zeros_like( distances )
+
+    previous_threshold = 0
+
+    # set weights according thresholds
+    for i, threshold in enumerate( thresholds ):
+        weight = weights[i]
+        mask = ( ( distances > previous_threshold ) & ( distances <= threshold ))
+        accuracy += ( mask.float() * weight )
+        previous_threshold = threshold
+
+    # aclculate mean accuracy
+    accuracy = torch.mean( accuracy ).item()
+
+    return accuracy
+
+def  collate_fn( batch, max_size=(1024, 1024) ):
+    filtered_batch = []
+    for item in batch:
+        image, label = item
+        if image.size(1) <= max_size[0] and image.size(2) <= max_size[1]:
+            filtered_batch.append((image, label))
+    if len(filtered_batch) == 0:
+        return None
+    return torch.utils.data.dataloader.default_collate(filtered_batch)
 
 if __name__ == "__main__":
     ############### 可視化套件的部分 ###############
@@ -86,13 +123,14 @@ if __name__ == "__main__":
     train_dataset, validation_dataset, test_dataset = random_split( dataset, [train_record_of_dataset, validation_record_of_dataset, test_record_of_dataset])
 
     # 為 3 部分數據集創建 DataLoader
-    train_loader = DataLoader( train_dataset, batch_size=pretrain['batch_size'], shuffle=True)
-    validation_loader = DataLoader( validation_dataset, pretrain['batch_size'], shuffle=True)
-    test_loader = DataLoader( test_dataset, pretrain['batch_size'], shuffle=True)
+    train_loader = DataLoader( train_dataset, batch_size=pretrain['batch_size'], shuffle=True, collate_fn=lambda x: collate_fn(x))
+    validation_loader = DataLoader( validation_dataset, pretrain['batch_size'], shuffle=True, collate_fn=lambda x: collate_fn(x))
+    test_loader = DataLoader( test_dataset, pretrain['batch_size'], shuffle=True, collate_fn=lambda x: collate_fn(x))
 
     ############### 模型的準備 ###############
     # 定義模型, 並將其移至 CPU 或 GPU 上
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(device)
     model = eval( pretrain['model_name'] )()
     model.to( device )
 
@@ -124,6 +162,7 @@ if __name__ == "__main__":
     val_loss_every_specific_step_list = []
 
     ############### 訓練環節 ###############
+    print("start training")
     for epoch in range( pretrain['num_epochs'] ):
         ### 初始化一些變數 ### 
         best_validation_accuracy = 0 # 記錄「最佳驗證準確度」
@@ -131,7 +170,11 @@ if __name__ == "__main__":
 
         # 單個 epoch 中的批次訓練, 遍歷數據集中的每一個批次
         # 這邊 images 和 labels 都是一整個批次的數據
-        for step, ( images, labels ) in enumerate( train_loader ):
+        for step, batch in enumerate( train_loader ):
+            if batch is None:
+                continue
+
+            ( images, labels ) = batch
             # 將 batch 中的每一筆 Data、label 都移至「指定設備」
             images = images.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
@@ -156,12 +199,15 @@ if __name__ == "__main__":
             train_loss.backward() # 反性傳播
             optimizer.step()      # 更新模型參數
 
+            # clear the memory
+            torch.cuda.empty_cache()
+
             # 記錄訓練損失和準確度
             training_loss_every_batch_in_epoch_list.append( train_loss.item() )
             training_accuracy_every_batch_in_epoch_list.append( train_accuracy )
 
             # 每隔一定步數進行驗證
-            if step % pretrain['log_step_of_batchs'] == 0:
+            if (step+1) % pretrain['log_step_of_batchs'] == 0:
 
                 # 切換模型為評估模式
                 model.eval()
@@ -174,7 +220,12 @@ if __name__ == "__main__":
                     val_accuracy_list = []
 
                     # 遍歷驗證集數據
-                    for val_images, val_labels in validation_loader:
+                    for val_batch in validation_loader:
+
+                        if val_batch is None:
+                            continue
+
+                        ( val_images, val_labels ) = val_batch
                         # 將驗證集的 images 和 labels 移動到設備（CPU 或 GPU）
                         val_images = val_images.to( device, non_blocking=True )
                         val_labels = val_labels.to( device, non_blocking=True )
@@ -209,23 +260,47 @@ if __name__ == "__main__":
                     if val_accuracy < best_validation_accuracy:
                         best_validation_accuracy = val_accuracy
                         best_model = copy.deepcopy(model)
+
+                    train_mean_loss_in_val = float( sum( training_loss_every_batch_in_epoch_list ) / len( training_loss_every_batch_in_epoch_list ) )
+                    train_mean_acc_in_val = float( sum( training_accuracy_every_batch_in_epoch_list ) / len( training_accuracy_every_batch_in_epoch_list ) )
                     
                     # print 並記錄當前 epoch 的訓練和驗證信息
-                    log_msg = (f"epoch {epoch}, step {step} / {len(train_loader) - 1}, "
-                               f"train_loss {train_loss.item():.5f}, "
-                               f"train_accuracy {train_accuracy:.5f}, "
-                               f"val_loss {val_loss.item():.5f}, "
-                               f"val_accuracy {val_accuracy:.5f}, "
-                               f"{pretrain['log_step_of_batches'] * pretrain['batch_size'] / (time.time() - now_time):.1f} imgs/s"
-                               f"===============================================")
+                    log_msg = (
+                        f"""===== epoch: {epoch:2}, step: {step+1:6} / {len(train_loader) - 1} =====\n """
+                        f"""train_loss: {train_mean_loss_in_val:6.4f}, """
+                        f"""train_accuracy: {train_mean_acc_in_val:.4f}\n"""
+                        f"""val_loss: {val_loss.item():6.4f}, """
+                        f"""val_accuracy {val_accuracy:.4f}\n"""
+                        f"""{pretrain['log_step_of_batchs'] * pretrain['batch_size'] / (time.time() - now_time):.1f} imgs/s"""
+                        f"""==============================================="""
+                    )
                     print( log_msg )
                     log_file.write( log_msg + '\n' )
 
-            log_msg = (f"epoch {epoch}, step {step} / {len(train_loader) - 1}, "
-                               f"train_loss {train_loss.item():.5f}, "
-                               f"train_accuracy {train_accuracy:.5f}, "
-                               f"===============================")
-            print( log_msg )
+                    now_time = time.time()
+
+            if (step+1) % 10 == 0:
+                #total_memory = torch.cuda.get_device_properties(0).total_memory / 1e6
+                #allocated = torch.cuda.memory_allocated() / 1e6
+                #reserved = torch.cuda.memory_reserved() / 1e6
+                #available_memory = total_memory - reserved
+                latest_10_loss = training_loss_every_batch_in_epoch_list[-10:]
+                mean_10_loss = float( sum( latest_10_loss ) / len( latest_10_loss ) )
+                latest_10_accuracy = training_accuracy_every_batch_in_epoch_list[-10:]
+                mean_10_accuracy = float( sum( latest_10_accuracy ) / len( latest_10_accuracy ) )
+                log_msg = (
+                    f"""epoch: {epoch:2}, step: {step+1:6} / {len(train_loader) - 1} || """
+                    f"""mean 10 loss: {mean_10_loss:6.4f}, accuracy: {mean_10_accuracy:.4f}\n"""
+                )
+                #           f"memory {allocated:.2f} / {reserved:.2f} MB || {available_memory} MB")
+                print( log_msg )
+                # predict_list = predicts.tolist()[0]
+                # predict_str = ' '.join(f"{x:4.4f}" for x in predict_list)
+                # label_list = labels.tolist()[0]
+                # label_str = ' '.join(f"{x:4.4f}" for x in label_list)
+                # print( f"predict: {predict_str}")
+                # print( f"label:   {label_str}")
+                # print( "--------------------" )
 
         # 更新學習率調度器 ?????????
         learning_rate_scheduler.step()
