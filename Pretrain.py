@@ -9,82 +9,61 @@ from torch.utils.tensorboard import SummaryWriter
 
 from PIL import Image
 
-from config import pretrain
-from MobileNetV2 import MobileNetV2
+from config import pretrain, general
+from MobileNetV2 import MobileNetV2, MultiTaskLoss, MultiTaskDecoder
 from DataAndDataset import PretrainDataset
 from UtilityMethods import getOptimizer, save_model, save_optimizer
-
-def _calculate_loss( predicts, ground_truth ):
-    """
-    分別計算四個部位的均方誤差並加總
-
-    Args:
-        predicts (Tensor): 形狀為 [batch_size, 8] 的預測座標張量
-        ground_truth (Tensor): 形狀為 [batch_size, 8] 的真實座標張量
-
-    Returns:
-        Tensor: 均方誤差損失
-    """
-
-    # 確保 predicts 和 ground_truth 具有相同的形狀
-    if predicts.shape != ground_truth.shape:
-        raise ValueError("Predicts and ground truth tensors must have the same shape")
-
-    # 計算均方誤差損失
-    loss = F.mse_loss( predicts , ground_truth , reduction='mean')
-    
-    return loss
 
 def _calculate_accuracy(predicts, ground_truth):
     """
     計算預測與真實座標之間的 euclid distance 作為準確度
 
     Args:
-        predicts (Tensor): 形狀為 [batch_size, 8] 的預測座標張量
+        predicts (list of tuple): 形狀為 [( 預測類別: int, 預測信心分數: 1*1 tensor, 預測座標: 1*2 tensor )...共 5 個] 的預測座標張量
         ground_truth (Tensor): 形狀為 [batch_size, 8] 的真實座標張量
 
     Returns:
-        float: 平均絕對誤差
+        float: 經過設計後的 accuracy
     """
 
     # 1024*1024 -> [10, 20, 31, 41, 51]
     # 96*96     -> [ 1,  2,  3,  4,  5]
     thresholds = [5, 10, 18, 30, 45]
     weights = [1.0, 0.9, 0.65, 0.35, 0.1]
-    
-    # 確保 predicts 和 ground_truth 具有相同的形狀
-    if predicts.shape != ground_truth.shape:
-        raise ValueError("Predicts and ground truth tensors must have the same shape")
 
-    # 計算平均絕對誤差
-    # absolute_errors = torch.abs(predicts - ground_truth)
-    # mean_absolute_error = torch.mean(absolute_errors).item()
+    # 把背景類的預測去除
+    predicts = predicts[:-1]
+    # 提取 4 組預測座標張量
+    predicted_coords = torch.stack([pred[2] for pred in predicts])
 
-    # chagne tensor to set of point of (x,y)
-    predicts = predicts.view( -1, 4, 2 )
+    # 將輸入的 1*8 張量轉換成 4*2 的座標張量 (x,y)
     ground_truth = ground_truth.view( -1, 4, 2 )
 
-    # calculate euclid distance of each point set
-    distances = torch.sqrt( torch.sum( (predicts - ground_truth)**2, dim=2 ) )
+    # 計算 predict 和 label 座標點之間的歐式距離
+    distances = torch.sqrt( torch.sum( (predicted_coords - ground_truth)**2, dim=2 ) )
 
-    # initialize tensor of Accuracy
+    # 初始化一個 1*4 的全 0 張量
     accuracy = torch.zeros_like( distances )
 
+    # 定義前一個閥值
     previous_threshold = 0
 
-    # set weights according thresholds
+    # 根據閥值設定加權
     for i, threshold in enumerate( thresholds ):
         weight = weights[i]
+        # 製造 mask, EX: [True, False, False, False]
         mask = ( ( distances > previous_threshold ) & ( distances <= threshold ))
+        # 將 Mask 的 True 轉換為 1.0, False 轉換為 0.0, 並且乘以權重做為 accuracy
         accuracy += ( mask.float() * weight )
+        # 更新前一個閥值, 以免重複加權
         previous_threshold = threshold
 
-    # aclculate mean accuracy
+    # 計算平均 accuracy
     accuracy = torch.mean( accuracy ).item()
 
     return accuracy
 
-def  collate_fn( batch, max_size=(1024, 1024) ):
+def  collate_fn( batch, max_size=( general['image_max_size'] , general['image_max_size'] ) ):
     filtered_batch = []
     for item in batch:
         image, label = item
@@ -137,6 +116,12 @@ if __name__ == "__main__":
     # Optimizer
     optimizer = getOptimizer( model.parameters(), pretrain['optimizer'] )()
 
+    # loss function
+    loss_fn = MultiTaskLoss()
+
+    # decoder
+    decoder = MultiTaskDecoder()
+
     # 檢查是否使用學習率調度器
     if pretrain.get('use_learning_rate_scheduler', False):
         # 初始化學習率調度器
@@ -183,20 +168,23 @@ if __name__ == "__main__":
             model.train()
 
             # 輸入數據進行座標預側
-            eyes_left, eyes_right, nose, mouth = model( images, use_dropout=True )
+            locations_pred, classifications_pred = model( images, use_dropout=True )
 
-            # 將預測結果拼接成一個 1*8 張量以便後續計算損失 -> [batch_size, 8]
-            predicts = torch.cat( (eyes_left, eyes_right, mouth, nose) , dim=1)
-
+            # 取得圖片的空間尺寸
+            imgage_size = ( images.size(2), images.size(3) )
             # 計算損失
-            train_loss = _calculate_loss( predicts , labels )
+            train_loss = loss_fn( locations_pred , classifications_pred , labels , imgage_size )
+            #print(f"step: {step:6} loss: {train_loss.item()}")
+
+            # 計算準確度前先進行 decode
+            predicts = decoder( locations_pred , classifications_pred )[0]
 
             # 計算準確度
-            train_accuracy = _calculate_accuracy( predicts, labels )
+            train_accuracy = _calculate_accuracy( predicts , labels )
 
             # 反向傳播和參數更新
             optimizer.zero_grad() # 反向傳播前將梯度歸 0, 否則梯度會累積
-            train_loss.backward() # 反性傳播
+            train_loss.backward() # 反向傳播
             optimizer.step()      # 更新模型參數
 
             # clear the memory
@@ -231,14 +219,18 @@ if __name__ == "__main__":
                         val_labels = val_labels.to( device, non_blocking=True )
 
                         # 設置模型為評估模式並進行預測
-                        val_eyes_left, val_eyes_right, val_nose, val_mouth = model( val_images, use_dropout=False)
+                        val_locations_pred, val_classifications_pred = model( val_images, use_dropout=False)
                         
-                        # 將預測結果拼接成一個張量 -> [batch_size, 8]
-                        val_predicts = torch.cat( ( val_eyes_left, val_eyes_right, val_nose, val_mouth ) , dim=1)
-                        
-                        # 計算驗證集的損失和準確度
-                        val_loss = _calculate_loss( val_predicts, val_labels )
-                        val_accuracy = _calculate_accuracy( val_predicts, val_labels )
+                        # 取得圖片的空間尺寸
+                        val_imgage_size = ( images.size(2), images.size(3) )
+                        # 計算驗證集的損失
+                        val_loss = loss_fn( val_locations_pred , val_classifications_pred , val_labels , val_imgage_size )
+
+                        # 計算準確度前先進行 decode
+                        val_predicts = decoder( val_locations_pred , val_classifications_pred )[0]
+
+                        # 計算驗證集準確度
+                        val_accuracy = _calculate_accuracy( val_predicts , val_labels )
 
                         # 將損失添加到 list 中
                         val_loss_list.append( val_loss.item() )
@@ -294,6 +286,9 @@ if __name__ == "__main__":
                 )
                 #           f"memory {allocated:.2f} / {reserved:.2f} MB || {available_memory} MB")
                 print( log_msg )
+                for idx, pred in enumerate( predicts ):
+                    if idx < 4:
+                        print(f"({pred[2][0]:04.2f}, {pred[2][1]:04.2f} / ({labels[0][ (idx*2) ]}, {labels[0][ (idx*2)+1 ]}))")
                 # predict_list = predicts.tolist()[0]
                 # predict_str = ' '.join(f"{x:4.4f}" for x in predict_list)
                 # label_list = labels.tolist()[0]

@@ -74,7 +74,7 @@ class PretrainDataset( Dataset):
         img_path = self.image_names[idx]
 
         # 從路徑名稱中提取圖片名稱
-        img_name = img_path.split('/')[-1]
+        img_name = img_path.split('\\')[-1]
 
         # 讀取圖片
         with Image.open( img_path ).convert('RGB') as img:

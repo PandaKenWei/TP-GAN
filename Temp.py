@@ -1,82 +1,62 @@
-for epoch in range(last_epoch + 1, config.train['num_epochs']):
-    best_val_acc = 0 
-    best_model = None
-    lr_scheduler.step()
-    for step, batch in enumerate(train_dataloader):
-        # warm up learning rate
-        # if config.train['resume_optimizer'] is None and epoch == last_epoch + 1:
-        #     optimizer.param_groups[0]['lr'] = lr_warmup(step + 1, config.train['warmup_length']) * config.train['learning_rate']
+import torch
+from MobileNetV2 import MultiTaskLoss, MultiTaskDecoder
 
-        for k in batch:
-            batch[k] = batch[k].cuda(non_blocking=True)
+# 假設的 distance_threshold_ratio
+distance_threshold_ratio = 0.5
 
-        set_requires_grad(stem, True)
-        predicts, features = stem(batch['img'], use_dropout=True)
-        train_acc, train_loss = compute_loss(predicts, batch['label'])
+# 假設的預測座標點 (batch_size=1, n=12, 2)
+locations_pred = torch.tensor([[[  1.0,   1.0], [420.0, 360.0], [370.0, 150.0], [180.0, 220.0],
+                                [330.0, 270.0], [290.0, 135.0], [500.0, 380.0], [190.0, 400.0], 
+                                [210.0, 420.0], [510.0,  70.0], [178.0, 321.0], [420.0, 110.0]]])
 
-        train_acc_log_list.append(train_acc.item())
-        train_loss_log_list.append(train_loss.item())
-        train_loss_epoch_list.append(train_loss.item())
+# 假設的 ground truth 座標點 (batch_size=1, 8)
+locations_true = torch.tensor([[0.0, 0.0, 150.0, 400.0, 350.0, 250.0, 300.0, 150.0]])
 
-        optimizer.zero_grad()
-        train_loss.backward()
-        optimizer.step()
+# 假設的分類結果 (batch_size=1, n=12, num_classes=3)
+classifications_pred = torch.tensor([[[2.0, 1.0, 0.1, 0.5, 1.4], [1.0, 2.0, 0.1, 0.3, 1.1], [0.1, 2.0, 1.0, 0.4, 0.5],
+                                      [2.0, 0.1, 1.0, 0.7, 0.5], [1.0, 0.1, 1.4, 0.8, 2.0], [0.1, 1.0, 2.0, 0.6, 0.7],
+                                      [2.0, 1.0, 0.1, 0.9, 1.5], [1.0, 0.8, 0.1, 1.1, 2.0], [0.1, 1.2, 1.0, 2.0, 0.5],
+                                      [2.0, 0.1, 1.0, 1.3, 0.6], [1.0, 0.1, 2.0, 1.4, 1.6], [0.1, 1.0, 1.3, 1.5, 2.0]]])
 
-        tb.add_scalar('loss', train_loss.item(), epoch * len(train_dataloader) + step, 'train')
-        tb.add_scalar('acc', train_acc.item(), epoch * len(train_dataloader) + step, 'train')
-        tb.add_scalar('lr', optimizer.param_groups[0]['lr'], epoch * len(train_dataloader), 'train')
+loss_fn = MultiTaskLoss()
+decoder = MultiTaskDecoder(nms_distance_threshold=30)
 
-        if step % config.train['log_step'] == 0:
-            set_requires_grad(stem, False)
-            tt = time.time()
-            if not config.test_time:
-                acc_num_list, loss_list = [], []
-                for idx, val_batch in enumerate(val_dataloader):
-                    for k in val_batch:
-                        val_batch[k] = val_batch[k].cuda(non_blocking=True)
-                    predicts, features = stem(val_batch['img'], use_dropout=False)
-                    val_acc, val_loss = compute_loss(predicts, val_batch['label'])
-                    val_acc_num = val_acc * predicts.shape[0]
+# 計算總損失
+total_loss = loss_fn( locations_pred , classifications_pred , locations_true , (600, 800))
 
-                    loss_list.append(val_loss)
-                    acc_num_list.append(val_acc_num)
-                val_loss = torch.mean(torch.stack(loss_list))
-                val_acc = torch.sum(torch.stack(acc_num_list)) / len(val_dataloader.dataset)
+print(f"Total Loss: {total_loss.item()}")
 
-                train_loss = np.mean(train_loss_log_list)
-                train_acc = np.mean(train_acc_log_list)
+# points = torch.tensor([
+#     [0.1, 0.2],
+#     [0.15, 0.25],
+#     [0.2, 0.3],
+#     [0.8, 0.8],
+#     [0.9, 0.9],
+#     [0.95, 0.95],
+#     [0.5, 0.5],
+#     [0.55, 0.55],
+#     [0.6, 0.6],
+#     [0.65, 0.65]
+# ])
 
-                train_loss_log_list, train_acc_log_list = [], []
+# print(points)
 
-                tb.add_scalar('loss', val_loss.item(), epoch * len(train_dataloader) + step, 'val')
-                tb.add_scalar('acc', val_acc.item(), epoch * len(train_dataloader) + step, 'val')
+# scores = torch.tensor([0.9, 0.85, 0.95, 0.6, 0.75, 0.5, 0.3, 0.4, 0.2, 0.1])
 
-                # if best_val_acc < val_acc:
-                #     best_val_acc = val_acc
-                #     best_model = copy.copy(stem)
+# keep_indices = decoder.nms(points, scores)
 
-                log_msg = ("epoch {} , step {} / {} , train_loss {:.5f}, train_acc {:.2%} , "
-                           "val_loss {:.5f} , val_acc {:.2%} {:.1f} imgs/s").format(
-                    epoch, step, len(train_dataloader) - 1, train_loss, train_acc, val_loss.item(), 
-                    val_acc.item(), config.train['log_step'] * config.train['batch_size'] / (tt - t))
-                print(log_msg)
-                log_file.write(log_msg + '\n')
+# print("保留的錨點索引：", keep_indices)
+# print("保留的錨點：", points[keep_indices])
+# print("保留的分數：", scores[keep_indices])
 
-            else:
-                print("epoch {} , step {} / step {} , data {:.3f}s , mv_to_cuda {:.3f}s "
-                      "forward {:.3f}s acc {:.3f}s loss {:.3f}s , backward {:.3f}s".format(
-                    epoch, step, len(train_dataloader), t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, t6 - t5))
-            t = tt
-    # optimizer.param_groups[0]['lr'] *= config.train['learning_rate_decay']
-    temp_train_loss = np.mean(train_loss_epoch_list)
+print(f"假的預測座標:\n{locations_pred}")
+print(f"假的預測類別:\n{classifications_pred}")
 
-    train_loss_epoch_list = []
-    train_loss_log_list = []
-    train_acc_log_list = []
-    # if config.train['auto_adjust_lr']:
-    #     auto_adjust_lr(optimizer, pre_train_loss, temp_train_loss)
-    # pre_train_loss = temp_train_loss
+decoded_output = decoder( locations_pred, classifications_pred)[0]
 
-    save_model(stem, tb.path, epoch)
-    save_optimizer(optimizer, stem, tb.path, epoch)
-    print("Save done in {}".format(tb.path))
+
+for class_label, score_tensor, point_tensor in decoded_output:
+    print(f"預測類別: {class_label}")
+    print(f"預測信心: {score_tensor.item():.4f}")
+    print(f"預測座標: ({point_tensor[0].item():.4f}, {point_tensor[1].item():.4f})")
+    print("---------------------")
